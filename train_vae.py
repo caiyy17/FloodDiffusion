@@ -138,7 +138,11 @@ class CustomLightningModule(BasicLightningModule):
                 )
 
                 # wandb log video
-                if not self.cfg.debug and self.logger is not None:
+                if (
+                    not self.cfg.debug
+                    and self.logger is not None
+                    and isinstance(self.logger, WandbLogger)
+                ):
                     video_to_log = []
                     for video_path in sorted(
                         os.listdir(f"{self.cfg.save_dir}/{dataset_id}/composite")
