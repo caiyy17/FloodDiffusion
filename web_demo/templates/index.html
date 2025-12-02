@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time 3D Motion Generation</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Real-time 3D Motion Generation</h1>
+            <p class="subtitle">AI-powered motion synthesis with streaming rendering</p>
+        </div>
+        
+        <div class="controls">
+            <div class="input-group">
+                <label for="motionText">Motion Description:</label>
+                <input type="text" id="motionText" placeholder="Enter motion description (e.g., walk forward, jump, dance)" value="walk in a circle.">
+            </div>
+            
+            <div class="input-group">
+                <label for="historyLength">History Length (tokens):</label>
+                <input type="number" id="historyLength" min="10" max="200" value="30" style="width: 100px;">
+                <span class="input-hint">Circular history window length (10-200, default 30)</span>
+            </div>
+            
+            <div class="button-group">
+                <button id="startResetBtn" class="btn btn-primary">Start</button>
+                <button id="updateBtn" class="btn btn-secondary" disabled>Update Text</button>
+                <button id="pauseResumeBtn" class="btn btn-warning" disabled>Pause</button>
+            </div>
+            
+            <div class="status-group">
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span id="status" class="status-value">Idle</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Buffer:</span>
+                    <span id="bufferSize" class="status-value">0 / 4</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">FPS:</span>
+                    <span id="fps" class="status-value">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Frames:</span>
+                    <span id="frameCount" class="status-value">0</span>
+                </div>
+            </div>
+            
+            <div id="conflictWarning" class="conflict-warning" style="display: none;">
+                <p><strong>⚠️ Another user is currently generating!</strong></p>
+                <p>Do you want to force stop their session and take over?</p>
+                <button id="forceTakeoverBtn" class="btn btn-danger">Force Takeover</button>
+                <button id="cancelTakeoverBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+        
+        <div id="canvas-container">
+            <canvas id="renderCanvas"></canvas>
+        </div>
+        
+        <div class="info">
+            <h3>Instructions:</h3>
+            <ul>
+                <li><strong>Start/Reset:</strong> Start begins generation when idle; Reset clears all state and restarts when running</li>
+                <li><strong>Update Text:</strong> Change motion description while running (no state reset, continuous generation)</li>
+                <li><strong>Pause/Resume:</strong> Pause/resume generation (preserves all state and history)</li>
+                <li><strong>History Length:</strong> Controls model's circular memory window (10-200 tokens, default 30)</li>
+            </ul>
+            <p class="note">Note: First generation requires model loading. Target FPS: 20. Ground trail shows character movement path.</p>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="/static/js/skeleton.js"></script>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
+
