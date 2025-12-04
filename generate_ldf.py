@@ -104,6 +104,9 @@ def generate_feature_stream(
 
 
 if __name__ == "__main__":
+    # Ensure tmp directory exists
+    os.makedirs("tmp", exist_ok=True)
+
     # Example usage
     text_list = ["walk in a circle.", "jump up."]
     text_end = [150, 250]
