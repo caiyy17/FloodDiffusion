@@ -1,5 +1,7 @@
 # FloodDiffusion: Tailored Diffusion Forcing for Streaming Motion Generation
 
+[[Project Page]](https://shandaai.github.io/FloodDiffusion/) | [[Paper (arXiv)]](https://arxiv.org/abs/2512.03520)
+
 We present **FloodDiffusion**, a new framework for text-driven, streaming human motion generation. Given time-varying text prompts, FloodDiffusion generates text-aligned, seamless motion sequences with real-time latency.
 
 ## Features
@@ -301,9 +303,10 @@ pl_train/
 If you use this code in your research, please cite:
 
 ```bibtex
-@article{flood2025,
+@article{cai2025flooddiffusion,
   title={FloodDiffusion: Tailored Diffusion Forcing for Streaming Motion Generation},
-  author={YIYI CAI, Yuhan Wu, Kunhang Li, YOU ZHOU, Bo Zheng, Haiyang Liu},
+  author={Yiyi Cai, Yuhan Wu, Kunhang Li, You Zhou, Bo Zheng, Haiyang Liu},
+  journal={arXiv preprint arXiv:2512.03520},
   year={2025}
 }
 ```
