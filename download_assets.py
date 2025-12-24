@@ -42,6 +42,7 @@ if __name__ == "__main__":
     # 3. Download Models (creates ./outputs/)
     print("Downloading model outputs...")
     download_extract_zip("outputs.zip", ".")
+    download_extract_zip("outputs_tiny.zip", "./outputs")
 
     print("\nDone! Your project is ready.")
     if not args.with_dataset:
