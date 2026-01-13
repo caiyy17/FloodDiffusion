@@ -380,6 +380,7 @@ def main():
             train_dataloader,
             val_dataloaders=[val_dataloader, test_dataloader],
             ckpt_path=cfg.resume_ckpt,
+            weights_only=False,
         )
     else:
         for i in range(cfg.config.val_repeat):
@@ -390,6 +391,7 @@ def main():
                 model,
                 dataloaders=[val_dataloader, test_dataloader],
                 ckpt_path=cfg.test_ckpt,
+                weights_only=False,
             )
             model.cfg.test_setting.render = False  # only render once
 
