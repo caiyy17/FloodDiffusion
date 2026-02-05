@@ -14,6 +14,8 @@ class DiffForcingWanModel(nn.Module):
         self,
         checkpoint_path="deps/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth",
         tokenizer_path="deps/t5_umt5-xxl-enc-bf16/google/umt5-xxl",
+        t5_size="xxl",
+        text_dim=4096,
         input_dim=256,
         hidden_dim=1024,
         ffn_dim=2048,
@@ -47,7 +49,7 @@ class DiffForcingWanModel(nn.Module):
         self.prediction_type = prediction_type
         self.causal = causal
 
-        self.text_dim = 4096
+        self.text_dim = text_dim
         self.text_len = text_len
         self.text_encoder = T5EncoderModel(
             text_len=self.text_len,
@@ -56,6 +58,7 @@ class DiffForcingWanModel(nn.Module):
             checkpoint_path=checkpoint_path,
             tokenizer_path=tokenizer_path,
             shard_fn=None,
+            t5_size=t5_size,
         )
 
         # Text encoding cache

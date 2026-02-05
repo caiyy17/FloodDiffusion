@@ -100,10 +100,13 @@ data:
     max_length: 200
 
 model:
-    target: models.diffusion_forcing_wan_tiny.DiffForcingWanModel
+    target: models.diffusion_forcing_wan.DiffForcingWanModel
     ema_decay: 0.99
     params:
-        model_name: "google/umt5-base"
+        checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
+        tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
+        t5_size: "base"
+        text_dim: 768
         input_dim: 4
         noise_steps: 10
         hidden_dim: 256

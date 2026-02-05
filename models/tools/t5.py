@@ -519,6 +519,30 @@ def umt5_xxl(**kwargs):
     return _t5("umt5-xxl", **cfg)
 
 
+def umt5_base(**kwargs):
+    cfg = dict(
+        vocab_size=256384,
+        dim=768,
+        dim_attn=768,
+        dim_ffn=2048,
+        num_heads=12,
+        encoder_layers=12,
+        decoder_layers=12,
+        num_buckets=32,
+        shared_pos=False,
+        dropout=0.1,
+    )
+    cfg.update(**kwargs)
+    return _t5("umt5-base", **cfg)
+
+
+# Model factory mapping
+_T5_MODEL_FACTORY = {
+    "xxl": umt5_xxl,
+    "base": umt5_base,
+}
+
+
 class T5EncoderModel:
     def __init__(
         self,
@@ -528,16 +552,21 @@ class T5EncoderModel:
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
+        t5_size="xxl",
     ):
         self.text_len = text_len
         self.dtype = dtype
         self.device = device
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
+        self.t5_size = t5_size
 
         # init model
+        if t5_size not in _T5_MODEL_FACTORY:
+            raise ValueError(f"Unknown t5_size: {t5_size}. Available: {list(_T5_MODEL_FACTORY.keys())}")
+        model_fn = _T5_MODEL_FACTORY[t5_size]
         model = (
-            umt5_xxl(
+            model_fn(
                 encoder_only=True, return_tokenizer=False, dtype=dtype, device=device
             )
             .eval()
