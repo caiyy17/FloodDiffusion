@@ -12,10 +12,6 @@ from .tools.wan_model import WanModel
 class DiffForcingWanModel(nn.Module):
     def __init__(
         self,
-        checkpoint_path="deps/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth",
-        tokenizer_path="deps/t5_umt5-xxl-enc-bf16/google/umt5-xxl",
-        t5_size="xxl",
-        text_dim=4096,
         input_dim=256,
         hidden_dim=1024,
         ffn_dim=2048,
@@ -23,14 +19,23 @@ class DiffForcingWanModel(nn.Module):
         num_heads=8,
         num_layers=8,
         time_embedding_scale=1.0,
-        chunk_size=5,
-        noise_steps=10,
+
         use_text_cond=True,
         text_len=512,
+        text_dim=4096,
+        t5_size="xxl",
+        checkpoint_path="deps/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth",
+        tokenizer_path="deps/t5_umt5-xxl-enc-bf16/google/umt5-xxl",
+        
         drop_out=0.1,
-        cfg_scale=5.0,
         prediction_type="vel",  # "vel", "x0", "noise"
         causal=False,
+        noise_type="linear",
+        noise_config={
+            "chunk_size": 5,
+        },
+        noise_steps=10,
+        cfg_scale=5.0,
     ):
         super().__init__()
 
@@ -41,13 +46,14 @@ class DiffForcingWanModel(nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.time_embedding_scale = time_embedding_scale
-        self.chunk_size = chunk_size
         self.noise_steps = noise_steps
         self.use_text_cond = use_text_cond
         self.drop_out = drop_out
         self.cfg_scale = cfg_scale
         self.prediction_type = prediction_type
         self.causal = causal
+        self.noise_type = noise_type
+        self.noise_config = noise_config
 
         self.text_dim = text_dim
         self.text_len = text_len
@@ -132,14 +138,20 @@ class DiffForcingWanModel(nn.Module):
 
     def _get_noise_levels(self, device, seq_len, time_steps):
         """Get noise levels"""
-        # noise_level[i] = clip(1 + i / chunk_size - time_steps, 0, 1)
-        noise_level = torch.clamp(
+        noise_level_base = torch.clamp(
             1
-            + torch.arange(seq_len, device=device) / self.chunk_size
+            + torch.arange(seq_len, device=device) / self.noise_config["chunk_size"]
             - time_steps.unsqueeze(1),
             min=0.0,
             max=1.0,
         )
+        if self.noise_type == "linear":
+            noise_level = noise_level_base
+            noise_derivative = torch.ones_like(noise_level)
+        elif self.noise_type == "exponential":
+            exponent = self.noise_config.get("exponent", 2.0)
+            noise_level = noise_level_base**exponent
+            noise_derivative = exponent * noise_level_base ** (exponent - 1)
         return noise_level
 
     def add_noise(self, x, noise_level):
@@ -164,48 +176,13 @@ class DiffForcingWanModel(nn.Module):
         time_steps = []
         for i in range(batch_size):
             valid_len = feature_length[i].item()
-            # Random float from 0 to valid_len/chunk_size, not an integer
-            max_time = valid_len / self.chunk_size
-            # max_time = valid_len / self.chunk_size + 1
+            max_time = valid_len
             time_steps.append(torch.FloatTensor(1).uniform_(0, max_time).item())
         time_steps = torch.tensor(time_steps, device=device)  # (B,)
-        noise_level = self._get_noise_levels(device, seq_len, time_steps)  # (B, T)
-
-        # # Debug: Print noise levels
-        # print("Time steps and corresponding noise levels:")
-        # for i in range(batch_size):
-        #     t = time_steps[i].item()
-        #     # Get noise level at each position
-        #     start_idx = int(self.chunk_size * (t - 1))
-        #     end_idx = int(self.chunk_size * t) + 2
-        #     # Limit to valid range
-        #     start_idx = max(0, start_idx)
-        #     end_idx = min(seq_len, end_idx)
-        #     print(time_steps[i])
-        #     print(noise_level[i, start_idx:end_idx])
+        noise_level, noise_derivative, start_index_list, end_index_list = self._get_noise_levels(device, seq_len, time_steps)  # (B, T)
 
         # Add noise to entire sequence
         noisy_feature, noise = self.add_noise(feature, noise_level)  # (B, T, D)
-
-        # Debug: Print noise addition information
-        # print("Added noise levels at chunk positions:")
-        # for i in range(batch_size):
-        #     t = time_steps[i].item()
-        #     start_idx = int(self.chunk_size * (t - 1))
-        #     end_idx = int(self.chunk_size * t) + 2
-        #     # Limit to valid range
-        #     start_idx = max(0, start_idx)
-        #     end_idx = min(seq_len, end_idx)
-        #     test1 = (
-        #         feature[i, start_idx:end_idx, :] - noisy_feature[i, start_idx:end_idx, :]
-        #     )
-        #     test2 = (
-        #         noise[i, start_idx:end_idx, :] - noisy_feature[i, start_idx:end_idx, :]
-        #     )
-        #     # Compute length on last dimension
-        #     print(test1.norm(dim=-1))
-        #     print(test2.norm(dim=-1))
-
         feature = self.preprocess(feature)  # (B, C, T, 1, 1)
         noisy_feature = self.preprocess(noisy_feature)  # (B, C, T, 1, 1)
         noise = self.preprocess(noise)  # (B, C, T, 1, 1)
@@ -214,8 +191,7 @@ class DiffForcingWanModel(nn.Module):
         noise_ref = []
         noisy_feature_input = []
         for i in range(batch_size):
-            t = time_steps[i].item()
-            end_index = int(self.chunk_size * t) + 1
+            end_index = end_index_list[i]
             valid_len = feature_length[i].item()
             end_index = min(valid_len, end_index)
             feature_ref.append(feature[i, :, :end_index, ...])
