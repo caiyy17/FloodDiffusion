@@ -171,18 +171,11 @@ class T5TextCrossModule(nn.Module):
         if text_key in x:
             new_ctx = self.encode(x[text_key], device)
         else:
-            new_ctx = self.encode(
-                [""] * len(self.stream_condition_list), device
-            )
+            raise ValueError(f"Input key '{text_key}' not found in input.")
         new_ctx = [u.to(param_dtype) for u in new_ctx]
 
         for i in range(len(self.stream_condition_list)):
-            if first_chunk:
-                self.stream_condition_list[i].extend(
-                    [new_ctx[i]] * chunk_size
-                )
-            else:
-                self.stream_condition_list[i].extend([new_ctx[i]])
+            self.stream_condition_list[i].extend([new_ctx[i]])
 
     def get_stream_context(self, end_index, seq_len):
         """Get context for current streaming window."""
@@ -507,6 +500,7 @@ class DiffForcingWanModel(nn.Module):
         for i in range(batch_size):
             length = min(feature_length[i].item(), seq_len)
             valid_len.append(length)
+        generated_len = [seq_len for _ in range(batch_size)]
 
         # Initialize entire sequence as pure noise, generate use seq_len for all samples
         generated = torch.randn(batch_size, seq_len, self.input_dim, device=device)
@@ -515,7 +509,7 @@ class DiffForcingWanModel(nn.Module):
 
         # Get contexts from cross modules
         all_contexts, metadata = self._get_all_contexts(
-            x, valid_len, seq_len, device, training=False,
+            x, generated_len, seq_len, device, training=False,
         )
         full_text = metadata.get("full_text", x.get("text", [""] * batch_size))
 
@@ -527,10 +521,10 @@ class DiffForcingWanModel(nn.Module):
         # Progressively advance from t=0 to t=1
         for step in range(total_steps):
             # get time steps and noise levels
-            time_steps = self._get_time_steps(device, valid_len, time_steps)  # (B,)
-            time_schedules, time_schedules_derivative = self._get_time_schedules(device, valid_len, time_steps)  # (B, T)
-            noise_level, noise_level_derivative = self._get_noise_levels(device, valid_len, time_schedules)  # (B, T)
-            input_start_index, input_end_index, output_start_index, output_end_index = self._get_window(valid_len, time_steps)
+            time_steps = self._get_time_steps(device, generated_len, time_steps)  # (B,)
+            time_schedules, time_schedules_derivative = self._get_time_schedules(device, generated_len, time_steps)  # (B, T)
+            noise_level, noise_level_derivative = self._get_noise_levels(device, generated_len, time_schedules)  # (B, T)
+            input_start_index, input_end_index, output_start_index, output_end_index = self._get_window(generated_len, time_steps)
 
             # Predict through WanModel
             noisy_input = []
@@ -598,173 +592,165 @@ class DiffForcingWanModel(nn.Module):
 
         return out
 
-    def init_generated(self, seq_len, batch_size=1):
+    def init_generated(self, seq_len):
         self.seq_len = seq_len
-        self.batch_size = batch_size
-        chunk_size = self.schedule_config["chunk_size"]
-        steps = self.schedule_config["steps"]
-        self.stream_dt = 1.0 / steps
-        self.current_step = 0
+        self.extra_len = self.schedule_config.get("extra_len", 0)
+        self.current_step = []
         self.commit_index = 0
 
-        total_buf = self.seq_len * 2 + chunk_size
-        generated = torch.randn(self.batch_size, total_buf, self.input_dim)
-        generated = [generated[i] for i in range(self.batch_size)]
-        self.generated = self.preprocess(generated)  # list of (C, total_buf, 1, 1)
-
+        total_buf = self.seq_len * 2 + self.extra_len
+        # Initialize entire sequence as pure noise
+        generated = torch.randn(1, total_buf, self.input_dim)
+        self.generated = self.preprocess([generated])[0]  # list of (C, total_buf, 1, 1)
         # Initialize streaming state for all cross modules
         for cm in self.cross_modules:
-            cm.init_stream(self.batch_size)
+            cm.init_stream(1)
 
-    @torch.no_grad()
-    def stream_generate_step(self, x, first_chunk=True):
-        """
-        Streaming generation step - Diffusion Forcing inference
-        Uses triangular noise schedule, progressively generating from left to right
+    # @torch.no_grad()
+    # def stream_generate_step(self, x, first_chunk=True):
+    #     """
+    #     Streaming generation step - Diffusion Forcing inference
+    #     Uses triangular noise schedule, progressively generating from left to right
 
-        Generation process:
-        1. Start from t=0, gradually increase t
-        2. Each t corresponds to a noise schedule: clean on left, noisy on right, gradient in middle
-        3. After each denoising step, t increases slightly and continues
-        """
+    #     Generation process:
+    #     1. Start from t=0, gradually increase t
+    #     2. Each t corresponds to a noise schedule: clean on left, noisy on right, gradient in middle
+    #     3. After each denoising step, t increases slightly and continues
+    #     """
 
-        device = next(self.parameters()).device
-        chunk_size = self.schedule_config["chunk_size"]
-        steps = self.schedule_config["steps"]
-        dt = self.stream_dt
+    #     device = next(self.parameters()).device
+    #     if first_chunk:
+    #         self.generated = self.generated.to(device)
 
-        if first_chunk:
-            for i in range(self.batch_size):
-                self.generated[i] = self.generated[i].to(device)
+    #     # Update streaming state for all cross modules
+    #     for cm in self.cross_modules:
+    #         cm.update_stream(x, device, self.param_dtype, first_chunk)
+    #     # Get null contexts for CFG
+    #     all_null_contexts = self._get_all_null_contexts(1, device)
+    #     while self.current_step < end_step:
+    #         # get time steps and noise levels
+    #         self.current_step = self._get_time_steps(device, [self.seq_len * 2], self.current_step)  # (B,)
+    #         time_schedules, time_schedules_derivative = self._get_time_schedules(device, [self.seq_len * 2], self.current_step)  # (B, T)
+    #         noise_level, noise_level_derivative = self._get_noise_levels(device, [self.seq_len * 2], time_schedules)  # (B, T)
+    #         input_start_index, input_end_index, output_start_index, output_end_index = self._get_window([self.seq_len * 2], self.current_step)
 
-        # Update streaming state for all cross modules
-        for cm in self.cross_modules:
-            cm.update_stream(
-                x, device, self.param_dtype, first_chunk, chunk_size
-            )
+    #         # Predict through WanModel
+    #         noisy_input = []
+    #         for i in range(1):
+    #             noisy_input.append(generated[i][:, input_start_index[i]:input_end_index[i], ...])  # (C, T, 1, 1)
 
-        # Get null contexts for CFG
-        all_null_contexts = self._get_all_null_contexts(self.batch_size, device)
+    #         # Pad noise_level list into [B, seq_len] tensor for WanModel
+    #         noise_level_padded = torch.zeros(1, seq_len, device=device)
+    #         for i in range(1):
+    #             nl = noise_level[i][:input_end_index[i]]
+    #             noise_level_padded[i, :len(nl)] = nl
 
-        end_step = (self.commit_index + chunk_size) * steps / chunk_size
-        while self.current_step < end_step:
-            current_time = self.current_step * dt
-            start_index = max(0, int(chunk_size * (current_time - 1)) + 1)
-            end_index = int(chunk_size * current_time) + 1
-            visible_len = min(end_index, self.seq_len)
+    #         predicted_result = self.model(
+    #             noisy_input,
+    #             noise_level_padded * self.time_embedding_scale,
+    #             all_contexts,
+    #             seq_len,
+    #             y=None,
+    #         )  # list of (C, T, 1, 1)
 
-            # Compute noise schedule for all positions 0..end_index-1
-            positions = torch.arange(end_index, device=device, dtype=torch.float32)
-            time_schedule_full = torch.clamp(
-                current_time - positions / chunk_size, min=0.0, max=1.0,
-            )
-            time_schedules_full = [time_schedule_full] * self.batch_size
-            noise_level_full, _ = self._get_noise_levels(
-                device, [end_index] * self.batch_size, time_schedules_full,
-            )
+    #         # Adjust using CFG
+    #         if self.cfg_scale != 1.0:
+    #             predicted_result_null = self.model(
+    #                 noisy_input,
+    #                 noise_level_padded * self.time_embedding_scale,
+    #                 all_null_contexts,
+    #                 seq_len,
+    #                 y=None,
+    #             )
+    #             predicted_result = [
+    #                 self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
+    #                 for pv, pvn in zip(predicted_result, predicted_result_null)
+    #             ]
 
-            # For model: pad last visible_len noise levels into [B, visible_len] tensor
-            noise_level_padded = torch.stack(
-                [nl[-self.seq_len:] for nl in noise_level_full]
-            )  # [B, visible_len]
+    #         for i in range(1):
+    #             predicted_result_i = predicted_result[i]  # (C, seq_len, 1, 1)
+    #             os, oe = output_start_index[i], output_end_index[i]
+    #             dt = time_schedules_derivative[i][os:oe][None, :, None, None]
+    #             if self.prediction_type == "vel":
+    #                 predicted_vel = predicted_result_i[:, os:oe, ...]
+    #                 generated[i][:, os:oe, ...] += predicted_vel * dt
+    #             elif self.prediction_type == "x0":
+    #                 nl = noise_level[i][os:oe][None, :, None, None]
+    #                 predicted_vel = (
+    #                     predicted_result_i[:, os:oe, ...]
+    #                     - generated[i][:, os:oe, ...]
+    #                 ) / nl
+    #                 generated[i][:, os:oe, ...] += predicted_vel * dt
+    #             elif self.prediction_type == "noise":
+    #                 nl = noise_level[i][os:oe][None, :, None, None]
+    #                 predicted_vel = (
+    #                     generated[i][:, os:oe, ...]
+    #                     - predicted_result_i[:, os:oe, ...]
+    #                 ) / (1 + dt - nl)
+    #                 generated[i][:, os:oe, ...] += predicted_vel * dt
 
-            # Predict noise through WanModel
-            noisy_input = []
-            for i in range(self.batch_size):
-                noisy_input.append(
-                    self.generated[i][:, :end_index, ...][:, -self.seq_len :]
-                )  # (C, visible_len, 1, 1)
+    #         for i in range(1):
+    #             predicted_result_i = predicted_result[i]  # (C, visible_len, 1, 1)
+    #             if end_index > self.seq_len:
+    #                 predicted_result_i = torch.cat(
+    #                     [
+    #                         torch.zeros(
+    #                             predicted_result_i.shape[0],
+    #                             end_index - self.seq_len,
+    #                             predicted_result_i.shape[2],
+    #                             predicted_result_i.shape[3],
+    #                             device=device,
+    #                         ),
+    #                         predicted_result_i,
+    #                     ],
+    #                     dim=1,
+    #                 )
+    #             nl = noise_level_full[i][start_index:end_index][None, :, None, None]
+    #             if self.prediction_type == "vel":
+    #                 predicted_vel = predicted_result_i[:, start_index:end_index, ...]
+    #                 self.generated[0][:, start_index:end_index, ...] += (
+    #                     predicted_vel * dt
+    #                 )
+    #             elif self.prediction_type == "x0":
+    #                 predicted_vel = (
+    #                     predicted_result_i[:, start_index:end_index, ...]
+    #                     - self.generated[i][:, start_index:end_index, ...]
+    #                 ) / nl
+    #                 self.generated[i][:, start_index:end_index, ...] += (
+    #                     predicted_vel * dt
+    #                 )
+    #             elif self.prediction_type == "noise":
+    #                 predicted_vel = (
+    #                     self.generated[i][:, start_index:end_index, ...]
+    #                     - predicted_result_i[:, start_index:end_index, ...]
+    #                 ) / (1 + dt - nl)
+    #                 self.generated[i][:, start_index:end_index, ...] += (
+    #                     predicted_vel * dt
+    #                 )
+    #         self.current_step += 1
 
-            # Get streaming context from all cross modules
-            all_stream_contexts = [
-                cm.get_stream_context(end_index, self.seq_len)
-                for cm in self.cross_modules
-            ]
+    #     output = [
+    #         self.generated[i][:, self.commit_index : self.commit_index + 1, ...]
+    #         for i in range(self.batch_size)
+    #     ]
+    #     output = self.postprocess(output)  # list of (1, C)
+    #     out = {}
+    #     out["generated"] = output
+    #     self.commit_index += 1
 
-            predicted_result = self.model(
-                noisy_input,
-                noise_level_padded * self.time_embedding_scale,
-                all_stream_contexts,
-                visible_len,
-                y=None,
-            )  # list of (C, visible_len, 1, 1)
-
-            # Adjust using CFG
-            if self.cfg_scale != 1.0:
-                predicted_result_null = self.model(
-                    noisy_input,
-                    noise_level_padded * self.time_embedding_scale,
-                    all_null_contexts,
-                    visible_len,
-                    y=None,
-                )
-                predicted_result = [
-                    self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
-                    for pv, pvn in zip(predicted_result, predicted_result_null)
-                ]
-
-            for i in range(self.batch_size):
-                predicted_result_i = predicted_result[i]  # (C, visible_len, 1, 1)
-                if end_index > self.seq_len:
-                    predicted_result_i = torch.cat(
-                        [
-                            torch.zeros(
-                                predicted_result_i.shape[0],
-                                end_index - self.seq_len,
-                                predicted_result_i.shape[2],
-                                predicted_result_i.shape[3],
-                                device=device,
-                            ),
-                            predicted_result_i,
-                        ],
-                        dim=1,
-                    )
-                nl = noise_level_full[i][start_index:end_index][None, :, None, None]
-                if self.prediction_type == "vel":
-                    predicted_vel = predicted_result_i[:, start_index:end_index, ...]
-                    self.generated[i][:, start_index:end_index, ...] += (
-                        predicted_vel * dt
-                    )
-                elif self.prediction_type == "x0":
-                    predicted_vel = (
-                        predicted_result_i[:, start_index:end_index, ...]
-                        - self.generated[i][:, start_index:end_index, ...]
-                    ) / nl
-                    self.generated[i][:, start_index:end_index, ...] += (
-                        predicted_vel * dt
-                    )
-                elif self.prediction_type == "noise":
-                    predicted_vel = (
-                        self.generated[i][:, start_index:end_index, ...]
-                        - predicted_result_i[:, start_index:end_index, ...]
-                    ) / (1 + dt - nl)
-                    self.generated[i][:, start_index:end_index, ...] += (
-                        predicted_vel * dt
-                    )
-            self.current_step += 1
-
-        output = [
-            self.generated[i][:, self.commit_index : self.commit_index + 1, ...]
-            for i in range(self.batch_size)
-        ]
-        output = self.postprocess(output)  # list of (1, C)
-        out = {}
-        out["generated"] = output
-        self.commit_index += 1
-
-        if self.commit_index == self.seq_len * 2:
-            for i in range(self.batch_size):
-                self.generated[i] = torch.cat(
-                    [
-                        self.generated[i][:, self.seq_len :, ...],
-                        torch.randn(
-                            self.input_dim, self.seq_len, 1, 1, device=device,
-                        ),
-                    ],
-                    dim=1,
-                )
-            self.current_step -= int(self.seq_len * steps / chunk_size)
-            self.commit_index -= self.seq_len
-            for cm in self.cross_modules:
-                cm.trim_stream(self.seq_len)
-        return out
+    #     if self.commit_index == self.seq_len * 2:
+    #         for i in range(self.batch_size):
+    #             self.generated[i] = torch.cat(
+    #                 [
+    #                     self.generated[i][:, self.seq_len :, ...],
+    #                     torch.randn(
+    #                         self.input_dim, self.seq_len, 1, 1, device=device,
+    #                     ),
+    #                 ],
+    #                 dim=1,
+    #             )
+    #         self.current_step -= int(self.seq_len * steps / chunk_size)
+    #         self.commit_index -= self.seq_len
+    #         for cm in self.cross_modules:
+    #             cm.trim_stream(self.seq_len)
+    #     return out
