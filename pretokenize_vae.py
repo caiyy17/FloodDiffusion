@@ -79,23 +79,24 @@ def tokenize_motion(
         )
         if os.path.exists(path_file):
             data_path = os.path.dirname(path_file)
-            feature_path = os.path.join(data_path, f"{feature_path}")
-            token_path = os.path.join(data_path, f"{token_path}")
-            if not os.path.exists(token_path):
-                os.makedirs(token_path)
+            cur_feature_path = os.path.join(data_path, f"{feature_path}")
+            cur_token_path = os.path.join(data_path, f"{token_path}")
+            if not os.path.exists(cur_token_path):
+                os.makedirs(cur_token_path)
+            cur_recovered_path = None
             if recovered_path is not None:
-                recovered_path = os.path.join(data_path, f"{recovered_path}")
-                if not os.path.exists(recovered_path):
-                    os.makedirs(recovered_path)
+                cur_recovered_path = os.path.join(data_path, f"{recovered_path}")
+                if not os.path.exists(cur_recovered_path):
+                    os.makedirs(cur_recovered_path)
             with open(path_file, "r") as f:
                 names = [line.strip() for line in f if line.strip()]
                 for name in tqdm(
                     names, desc=f"Processing {os.path.basename(path_file)}"
                 ):
-                    single_feature_path = f"{feature_path}/{name}.npy"
-                    single_token_path = f"{token_path}/{name}.npy"
-                    if recovered_path is not None:
-                        single_recovered_path = f"{recovered_path}/{name}.npy"
+                    single_feature_path = f"{cur_feature_path}/{name}.npy"
+                    single_token_path = f"{cur_token_path}/{name}.npy"
+                    if cur_recovered_path is not None:
+                        single_recovered_path = f"{cur_recovered_path}/{name}.npy"
                     if os.path.exists(single_feature_path):
                         try:
                             feature = np.load(single_feature_path, allow_pickle=True)
@@ -103,7 +104,7 @@ def tokenize_motion(
                             token = vae_model.encode(feature)
                             recovered = vae_model.decode(token)
                             np.save(single_token_path, token.detach().cpu().numpy()[0])
-                            if recovered_path is not None:
+                            if cur_recovered_path is not None:
                                 np.save(
                                     single_recovered_path,
                                     recovered.detach().cpu().numpy()[0],
