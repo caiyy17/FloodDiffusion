@@ -708,9 +708,10 @@ class DiffForcingWanModel(nn.Module):
         self.condition_frames = 0
 
         device = next(self.parameters()).device
-        # Initialize entire buffer as pure noise
-        generated = torch.randn(self.batch_size, self.buf_len, self.input_dim, device=device)
-        self.generated = self.preprocess([generated])[0]  # (C, buf_len, 1, 1)
+        # Initialize entire buffer as pure noise — list of B (C, buf_len, 1, 1)
+        generated = torch.randn(batch_size, self.buf_len, self.input_dim, device=device)
+        generated = [generated[i] for i in range(batch_size)]
+        self.generated = self.preprocess(generated)
 
         # Initialize streaming state for all cross modules
         for cm in self.cross_modules:
@@ -721,11 +722,12 @@ class DiffForcingWanModel(nn.Module):
 
     def _rollback(self):
         """Shift buffer by seq_len when conditions overflow the window."""
-        self.generated[:, :self.seq_len, ...] = self.generated[:, self.seq_len:, ...].clone()
-        self.generated[:, self.seq_len:, ...] = torch.randn(
-            self.batch_size, self.input_dim, self.seq_len, 1, 1,
-            device=self.generated.device,
-        )
+        for i in range(self.batch_size):
+            self.generated[i][:, :self.seq_len, ...] = self.generated[i][:, self.seq_len:, ...].clone()
+            self.generated[i][:, self.seq_len:, ...] = torch.randn(
+                self.input_dim, self.seq_len, 1, 1,
+                device=self.generated[i].device,
+            )
         self.current_step -= self.time_scheduler.get_step_rollback(self.seq_len)
         self.condition_frames -= self.seq_len
         self.current_commit -= self.seq_len
@@ -742,7 +744,7 @@ class DiffForcingWanModel(nn.Module):
             dict with "generated": list of one (N, C) tensor, or [] if nothing to commit.
         """
         device = next(self.parameters()).device
-        self.generated = self.generated.to(device)
+        self.generated = [g.to(device) for g in self.generated]
 
         # 1. Update conditions (1 frame per call)
         for cm in self.cross_modules:
@@ -765,7 +767,8 @@ class DiffForcingWanModel(nn.Module):
                 device, [self.buf_len], time_schedules)
             is_, ie_, os_, oe_ = self.time_scheduler.get_windows(
                 [self.buf_len], time_steps)
-            noisy_input = [self.generated[:, is_[0]:ie_[0], ...][:, -self.seq_len:, ...]]
+            noisy_input = [self.generated[i][:, is_[0]:ie_[0], ...][:, -self.seq_len:, ...]
+                           for i in range(self.batch_size)]
             ts = time_schedules[0][is_[0]:ie_[0]][-self.seq_len:]
             cut_length = max(0, (ie_[0] - is_[0]) - self.seq_len)
 
@@ -774,8 +777,9 @@ class DiffForcingWanModel(nn.Module):
                 for cm in self.cross_modules
             ]
 
-            time_schedules_padded = torch.zeros(1, self.seq_len, device=device)
-            time_schedules_padded[0, :len(ts)] = ts
+            time_schedules_padded = torch.zeros(self.batch_size, self.seq_len, device=device)
+            for i in range(self.batch_size):
+                time_schedules_padded[i, :len(ts)] = ts
 
             predicted_result = self.model(
                 noisy_input,
@@ -798,37 +802,40 @@ class DiffForcingWanModel(nn.Module):
                     for pv, pvn in zip(predicted_result, predicted_result_null)
                 ]
 
-            predicted_result_i = predicted_result[0]
             os_idx, oe_idx = os_[0], oe_[0]
             dt = time_schedules_derivative[0][os_idx:oe_idx][None, :, None, None]
-
             pred_os_idx = os_idx - cut_length
             pred_oe_idx = oe_idx - cut_length
-            if self.prediction_type == "vel":
-                predicted_vel = predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
-                self.generated[:, os_idx:oe_idx, ...] += predicted_vel * dt
-            elif self.prediction_type == "x0":
-                nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
-                predicted_vel = (
-                    predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
-                    - self.generated[:, os_idx:oe_idx, ...]
-                ) / nl
-                self.generated[:, os_idx:oe_idx, ...] += predicted_vel * dt
-            elif self.prediction_type == "noise":
-                nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
-                predicted_vel = (
-                    self.generated[:, os_idx:oe_idx, ...]
-                    - predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
-                ) / (1 + dt - nl)
-                self.generated[:, os_idx:oe_idx, ...] += predicted_vel * dt
+
+            for i in range(self.batch_size):
+                predicted_result_i = predicted_result[i]
+                if self.prediction_type == "vel":
+                    predicted_vel = predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
+                    self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
+                elif self.prediction_type == "x0":
+                    nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
+                    predicted_vel = (
+                        predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
+                        - self.generated[i][:, os_idx:oe_idx, ...]
+                    ) / nl
+                    self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
+                elif self.prediction_type == "noise":
+                    nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
+                    predicted_vel = (
+                        self.generated[i][:, os_idx:oe_idx, ...]
+                        - predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
+                    ) / (1 + dt - nl)
+                    self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
 
             self.current_step += 1
 
         # 5. Extract newly committed frames
         if self.current_commit < committable_index:
-            output = [self.generated[:, self.current_commit:committable_index, ...]]
+            output = [self.generated[i][:, self.current_commit:committable_index, ...]
+                       for i in range(self.batch_size)]
             output = self.postprocess(output)
             self.current_commit = committable_index
             return {"generated": output}
         else:
-            return {"generated": [torch.zeros(0, self.input_dim, device=device)]}
+            return {"generated": [torch.zeros(0, self.input_dim, device=device)
+                                  for _ in range(self.batch_size)]}
