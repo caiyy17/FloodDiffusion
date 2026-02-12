@@ -15,6 +15,7 @@ CORS(app)
 # Global model manager (lazy loaded)
 model_manager = None
 model_config_path = None  # Will be set once at startup
+model_schedule_config = None  # Read from config at startup (before model load)
 
 # Session tracking - only one active session can generate at a time
 active_session_id = None  # The session ID currently generating
@@ -98,6 +99,18 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/api/config', methods=['GET'])
+def get_config():
+    """Get model schedule config (available before model load)"""
+    chunk_size = model_schedule_config.get('chunk_size') if model_schedule_config else None
+    steps = model_schedule_config.get('steps') if model_schedule_config else None
+    return jsonify({
+        'chunk_size': chunk_size,
+        'default_steps': steps,
+        'default_history': chunk_size * 2 if chunk_size else None,
+    })
+
+
 @app.route('/api/start', methods=['POST'])
 def start_generation():
     """Start generation with given text"""
@@ -107,7 +120,7 @@ def start_generation():
         data = request.json
         session_id = data.get('session_id')
         text = data.get('text', 'walk in a circle.')
-        history_length = data.get('history_length', 30)
+        history_length = data.get('history_length')
         smoothing_alpha = data.get('smoothing_alpha', None)  # Optional smoothing parameter
         denoise_steps = data.get('denoise_steps', None)  # Optional denoising steps
         force = data.get('force', False)  # Allow force takeover
@@ -172,7 +185,9 @@ def start_generation():
         return jsonify({
             'status': 'success',
             'message': f'Generation started with text: {text}, history_length: {history_length}',
-            'session_id': session_id
+            'session_id': session_id,
+            'denoise_steps': mm.denoise_steps,
+            'chunk_size': mm.model.schedule_config["chunk_size"],
         })
     except Exception as e:
         print(f"Error in start_generation: {e}")
@@ -314,9 +329,9 @@ def reset():
         
         data = request.json if request.json else {}
         session_id = data.get('session_id')
-        history_length = data.get('history_length', 30)
-        smoothing_alpha = data.get('smoothing_alpha', None)
-        denoise_steps = data.get('denoise_steps', None)
+        history_length = data.get('history_length')
+        smoothing_alpha = data.get('smoothing_alpha')
+        denoise_steps = data.get('denoise_steps')
         
         # If session_id provided, verify it's the active session
         if session_id:
@@ -345,7 +360,9 @@ def reset():
         
         return jsonify({
             'status': 'success',
-            'message': f'Reset complete with history_length: {history_length}{params_msg}'
+            'message': f'Reset complete with history_length: {history_length}{params_msg}',
+            'denoise_steps': model_manager.denoise_steps if model_manager else denoise_steps,
+            'chunk_size': model_manager.model.schedule_config["chunk_size"] if model_manager else None,
         })
     except Exception as e:
         return jsonify({
@@ -456,7 +473,33 @@ if __name__ == '__main__':
     
     # Set config path (this is module-level code, no need for global declaration)
     model_config_path = args.config
-    
+
+    # Read schedule_config from config file (lightweight, no model loading)
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from utils.initialize import load_config
+    original_dir = os.getcwd()
+    os.chdir(os.path.dirname(os.path.dirname(__file__)))
+    try:
+        cfg = load_config(config_path=model_config_path)
+        # Default schedule_config matching DiffForcingWanModel constructor default
+        default_schedule_config = {
+            "schedule_name": "TriangularTimeScheduler",
+            "noise_type": "linear",
+            "chunk_size": 5,
+            "steps": 10,
+            "extra_len": 5,
+        }
+        config_schedule = dict(cfg.model.params.get('schedule_config', {}))
+        default_schedule_config.update(config_schedule)
+        model_schedule_config = default_schedule_config
+        print(f"Schedule config: {model_schedule_config}")
+    except Exception as e:
+        print(f"Warning: Could not read schedule_config from config: {e}")
+        model_schedule_config = {}
+    finally:
+        os.chdir(original_dir)
+
     print("Starting Flask server...")
     print(f"Config file: {model_config_path}")
     print("Note: Model will be loaded on first generation request")

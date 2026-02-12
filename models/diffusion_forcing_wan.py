@@ -398,7 +398,7 @@ class DiffForcingWanModel(nn.Module):
             "noise_type": "linear",
             "chunk_size": 5,
             "steps": 10,
-            "extra_len": 5,
+            "extra_len": 4,
         },
         cfg_scale=5.0,
     ):

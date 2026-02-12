@@ -38,8 +38,7 @@ case "$1" in
         
     stop)
         if [ ! -f "$PID_FILE" ]; then
-            echo "No PID file found. Killing all python app.py processes..."
-            pkill -9 -f "python app.py"
+            echo "No PID file found. Server is not running."
             exit 0
         fi
         

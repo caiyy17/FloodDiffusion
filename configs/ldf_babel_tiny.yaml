@@ -5,7 +5,7 @@ train: true
 
 save_dir: ./outputs
 resume_ckpt: null
-test_ckpt: "${dirs.outputs}/20251219_01492_ldf_tiny_stream/step_step=200000.ckpt"
+test_ckpt: "${dirs.outputs}/20260212_211535_test_5090_ldf_new/step_step=10000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/20260113_233726_vae_wan_z4/step_step=2250000.ckpt"
 test_vae:
     target: models.vae_wan.VAEWanModel
@@ -93,8 +93,8 @@ data:
         - target: datasets.babel.BabelDataset
           train_meta_paths:
               - ${dirs.raw_data}/BABEL_streamed/train_processed.txt
-          val_meta_paths: []
-              #   - ${dirs.raw_data}/BABEL_streamed/test_min_processed.txt
+          val_meta_paths:
+              - ${dirs.raw_data}/BABEL_streamed/test_min_processed.txt
               # - ${dirs.raw_data}/BABEL_streamed/val_processed.txt
           test_meta_paths:
               - ${dirs.raw_data}/BABEL_streamed/test_min_processed.txt
@@ -110,9 +110,9 @@ data:
           train_meta_paths:
               - ${dirs.raw_data}/HumanML3D/train.txt
           val_meta_paths:
-              #   - ${dirs.raw_data}/HumanML3D/val.txt
-              # - ${dirs.raw_data}/HumanML3D/test_min.txt
-              - ${dirs.raw_data}/HumanML3D/test.txt
+              # - ${dirs.raw_data}/HumanML3D/val.txt
+              - ${dirs.raw_data}/HumanML3D/test_min.txt
+              # - ${dirs.raw_data}/HumanML3D/test.txt
           test_meta_paths:
               - ${dirs.raw_data}/HumanML3D/test_min.txt
           feature_path: "new_joint_vecs"

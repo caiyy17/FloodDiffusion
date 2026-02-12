@@ -81,8 +81,9 @@ class ModelManager:
         
         # Model generation state
         self.first_chunk = True
-        self.history_length = 30  # Default history window length
-        self.denoise_steps = 10  # Default denoising steps
+        chunk_size = self.model.schedule_config["chunk_size"]
+        self.history_length = chunk_size * 2
+        self.denoise_steps = self.model.schedule_config["steps"]
         
         print("ModelManager initialized successfully")
     
@@ -163,7 +164,7 @@ class ModelManager:
             self.stream_recovery.reset()
             self.vae.clear_cache()
             self.first_chunk = True
-            self.model.init_generated(self.history_length, batch_size=1, num_denoise_steps=self.denoise_steps)
+            self.model.init_generated(self.history_length, batch_size=1, schedule_config={"steps": self.denoise_steps})
             print(f"Model initialized with history length: {self.history_length}, denoise steps: {self.denoise_steps}")
             
             # Start generation thread
@@ -213,7 +214,7 @@ class ModelManager:
                 - 1.0 = no smoothing (default)
                 - 0.0 = infinite smoothing
                 - Recommended: 0.3-0.7 for visible smoothing
-            denoise_steps: Number of denoising steps (1-50, default 10)
+            denoise_steps: Number of denoising steps (must be multiple of chunk_size)
         """
         # Stop if running
         if self.is_generating:
@@ -228,9 +229,8 @@ class ModelManager:
             self.history_length = history_length
         
         if denoise_steps is not None:
-            # Ensure denoise_steps is multiple of chunk_size (5)
-            chunk_size = 5
-            denoise_steps = np.clip(denoise_steps, chunk_size, 50)
+            chunk_size = self.model.schedule_config["chunk_size"]
+            denoise_steps = max(denoise_steps, chunk_size)
             # Round to nearest multiple of chunk_size
             self.denoise_steps = int(np.round(denoise_steps / chunk_size) * chunk_size)
             print(f"Denoising steps updated to: {self.denoise_steps} (must be multiple of {chunk_size})")
@@ -247,7 +247,7 @@ class ModelManager:
         )
         
         # Initialize model with denoise steps
-        self.model.init_generated(self.history_length, batch_size=1, num_denoise_steps=self.denoise_steps)
+        self.model.init_generated(self.history_length, batch_size=1, schedule_config={"steps": self.denoise_steps})
         print(f"Model reset - history: {self.history_length}, smoothing: {self.smoothing_alpha}, steps: {self.denoise_steps}")
     
     def _generation_loop(self):
@@ -269,19 +269,20 @@ class ModelManager:
                         x = {"text": [self.current_text]}
                         
                         # Generate from model (1 token)
-                        # Note: denoise_steps is set in init_generated, not here
-                        output = self.model.stream_generate_step(
-                            x, first_chunk=self.first_chunk
-                        )
+                        output = self.model.stream_generate_step(x)
                         generated = output["generated"]
-                        
+
+                        # Skip if no frames committed yet
+                        if generated[0].shape[0] == 0:
+                            continue
+
                         # Decode with VAE (1 token -> 4 frames)
                         decoded = self.vae.stream_decode(
                             generated[0][None, :], first_chunk=self.first_chunk
                         )[0]
-                        
+
                         self.first_chunk = False
-                        
+
                         # Convert each frame to joints
                         for i in range(decoded.shape[0]):
                             frame_data = decoded[i].cpu().numpy()
@@ -325,6 +326,7 @@ class ModelManager:
             "current_text": self.current_text,
             "smoothing_alpha": self.smoothing_alpha,
             "denoise_steps": self.denoise_steps,
+            "chunk_size": self.model.schedule_config["chunk_size"],
         }
 
 

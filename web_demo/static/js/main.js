@@ -14,7 +14,8 @@ class MotionApp {
         this.fpsCounter = 0;
         this.fpsUpdateTime = 0;
         this.lastRenderTime = 0;
-        
+        this.chunkSize = null; // Set from /api/config on page load
+
         // Motion FPS tracking (frame consumption rate)
         this.motionFrameCount = 0;
         this.motionFpsCounter = 0;
@@ -202,6 +203,24 @@ class MotionApp {
             const value = parseFloat(e.target.value).toFixed(2);
             this.smoothingValue.textContent = value;
         });
+
+        // Fetch config from server on page load
+        fetch('/api/config')
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then(data => {
+                if (!data.chunk_size) throw new Error('chunk_size not found in config');
+                if (data.default_steps) this.denoiseSteps.value = data.default_steps;
+                if (data.default_history) this.historyLength.value = data.default_history;
+                this._syncServerConfig(data);
+            })
+            .catch(e => {
+                this.statusEl.textContent = 'Error: failed to load config';
+                this.startResetBtn.disabled = true;
+                console.error('Failed to fetch config:', e);
+            });
     }
     
     async toggleStartReset() {
@@ -225,24 +244,21 @@ class MotionApp {
             return;
         }
         
-        const historyLength = parseInt(this.historyLength.value) || 30;
-        if (historyLength < 10 || historyLength > 200) {
-            alert('History length must be between 10 and 200');
-            return;
+        const historyLength = parseInt(this.historyLength.value) || (this.chunkSize ? this.chunkSize * 2 : 40);
+        const denoiseSteps = parseInt(this.denoiseSteps.value) || (this.chunkSize ? this.chunkSize : 20);
+        if (this.chunkSize !== null) {
+            if (historyLength < this.chunkSize * 2) {
+                alert(`History length must be at least ${this.chunkSize * 2} (2x chunk_size)`);
+                return;
+            }
+            if (denoiseSteps < this.chunkSize) {
+                alert(`Denoising steps must be at least ${this.chunkSize}`);
+                return;
+            }
         }
-        
-        const denoiseSteps = parseInt(this.denoiseSteps.value) || 10;
-        if (denoiseSteps < 5 || denoiseSteps > 50) {
-            alert('Denoising steps must be between 5 and 50');
-            return;
-        }
-        if (denoiseSteps % 5 !== 0) {
-            alert('Denoising steps must be a multiple of 5 (e.g., 5, 10, 15, 20...)');
-            return;
-        }
-        
+
         const smoothingAlpha = parseFloat(this.smoothingAlpha.value);
-        
+
         this.isProcessing = true;
         this.statusEl.textContent = 'Initializing...';
         
@@ -279,6 +295,7 @@ class MotionApp {
                 this.pauseResumeBtn.disabled = false;
                 this.pauseResumeBtn.textContent = 'Pause';
                 this.statusEl.textContent = 'Running';
+                this._syncServerConfig(data);
                 this.startFrameLoop();
             } else if (response.status === 409 && data.conflict) {
                 // Another session is running, show warning UI
@@ -418,10 +435,20 @@ class MotionApp {
     async reset() {
         if (this.isProcessing) return;  // Prevent concurrent operations
         
-        const historyLength = parseInt(this.historyLength.value) || 30;
+        const historyLength = parseInt(this.historyLength.value) || (this.chunkSize ? this.chunkSize * 2 : 40);
+        const denoiseSteps = parseInt(this.denoiseSteps.value) || (this.chunkSize ? this.chunkSize : 20);
+        if (this.chunkSize !== null) {
+            if (historyLength < this.chunkSize * 2) {
+                alert(`History length must be at least ${this.chunkSize * 2} (2x chunk_size)`);
+                return;
+            }
+            if (denoiseSteps < this.chunkSize) {
+                alert(`Denoising steps must be at least ${this.chunkSize}`);
+                return;
+            }
+        }
         const smoothingAlpha = parseFloat(this.smoothingAlpha.value);
-        const denoiseSteps = parseInt(this.denoiseSteps.value) || 10;
-        
+
         this.isProcessing = true;
         try {
             const response = await fetch('/api/reset', {
@@ -458,7 +485,8 @@ class MotionApp {
                 this.bufferSizeEl.textContent = '0 / 4';
                 this.frameCountEl.textContent = '0';
                 this.fpsEl.textContent = '0';
-                
+                this._syncServerConfig(data);
+
                 // Clear trail
                 if (this.skeleton) {
                     this.skeleton.clearTrail();
@@ -596,6 +624,35 @@ class MotionApp {
         }
     }
     
+    _syncServerConfig(data) {
+        if (data.denoise_steps !== undefined) {
+            this.denoiseSteps.value = data.denoise_steps;
+        }
+        if (data.chunk_size !== undefined && data.chunk_size !== this.chunkSize) {
+            this.chunkSize = data.chunk_size;
+            const minSteps = this.chunkSize;
+            const minHistory = this.chunkSize * 2;
+            this.denoiseSteps.min = minSteps;
+            this.denoiseSteps.step = this.chunkSize;
+            this.historyLength.min = minHistory;
+            // Adjust values if below new minimum
+            if (parseInt(this.denoiseSteps.value) < minSteps) {
+                this.denoiseSteps.value = minSteps;
+            }
+            if (parseInt(this.historyLength.value) < minHistory) {
+                this.historyLength.value = minHistory;
+            }
+            const denoiseHint = document.getElementById('denoiseStepsHint');
+            if (denoiseHint) {
+                denoiseHint.textContent = `multiples of ${this.chunkSize}, min ${this.chunkSize}`;
+            }
+            const historyHint = document.getElementById('historyLengthHint');
+            if (historyHint) {
+                historyHint.textContent = `min ${minHistory} tokens (2x chunk_size)`;
+            }
+        }
+    }
+
     async updateStatus() {
         try {
             const response = await fetch(`/api/status?session_id=${this.sessionId}`);
