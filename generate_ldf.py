@@ -171,7 +171,7 @@ if __name__ == "__main__":
         # streaming generate step
         print("Streaming generate step...")
         vae.clear_cache()
-        model.init_generated(30, batch_size=1)
+        model.init_generated(30)
         text_end_with_zero = [0] + text_end
         durations = [
             t - b for t, b in zip(text_end_with_zero[1:], text_end_with_zero[:-1])
@@ -195,9 +195,11 @@ if __name__ == "__main__":
                 start_time = time.time()
                 x = {}
                 x["text"] = [text_item]  # text_item is a string
-                output = model.stream_generate_step(x, first_chunk=first_chunk)
+                output = model.stream_generate_step(x)
                 output = output["generated"]
                 # print("output shape: ", output[0].shape)
+                if output[0].shape[0] == 0:
+                    continue
                 decoded_g = vae.stream_decode(
                     output[0][None, :], first_chunk=first_chunk
                 )[0]

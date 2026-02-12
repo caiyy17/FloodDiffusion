@@ -90,6 +90,7 @@ class UniformTimeScheduler:
 
     # --- Streaming support ---
 
+    # We assume seq_len is multiple of generate_length for simplicity
     def get_committable(self, condition_frames):
         """Given total accumulated conditions, return how many frames can be committed and the corresponding step count."""
         wave_index = condition_frames // self.generate_length
@@ -686,7 +687,7 @@ class DiffForcingWanModel(nn.Module):
 
         return out
 
-    def init_generated(self, seq_len, schedule_config={}):
+    def init_generated(self, seq_len, batch_size=1, schedule_config={}):
         """Initialize streaming generation state.
 
         Args:
@@ -699,29 +700,30 @@ class DiffForcingWanModel(nn.Module):
         self.schedule_config.update(schedule_config)
         self.time_scheduler = TIME_SCHEDULER_REGISTRY[self.schedule_config["schedule_name"]](self.schedule_config)
 
+        self.batch_size = batch_size
         self.seq_len = seq_len
         self.buf_len = seq_len * 2
         self.current_step = 0
-        self.current_commit = -1
+        self.current_commit = 0
         self.condition_frames = 0
 
         device = next(self.parameters()).device
         # Initialize entire buffer as pure noise
-        generated = torch.randn(self.buf_len, self.input_dim, device=device)
+        generated = torch.randn(self.batch_size, self.buf_len, self.input_dim, device=device)
         self.generated = self.preprocess([generated])[0]  # (C, buf_len, 1, 1)
 
         # Initialize streaming state for all cross modules
         for cm in self.cross_modules:
-            cm.init_stream(1)
+            cm.init_stream(self.batch_size)
 
         # Pre-compute null contexts for CFG
-        self.stream_null_contexts = self._get_all_null_contexts(1, device)
+        self.stream_null_contexts = self._get_all_null_contexts(self.batch_size, device)
 
     def _rollback(self):
         """Shift buffer by seq_len when conditions overflow the window."""
         self.generated[:, :self.seq_len, ...] = self.generated[:, self.seq_len:, ...].clone()
         self.generated[:, self.seq_len:, ...] = torch.randn(
-            self.input_dim, self.seq_len, 1, 1,
+            self.batch_size, self.input_dim, self.seq_len, 1, 1,
             device=self.generated.device,
         )
         self.current_step -= self.time_scheduler.get_step_rollback(self.seq_len)
@@ -752,7 +754,7 @@ class DiffForcingWanModel(nn.Module):
             self._rollback()
 
         # 3. Determine how many frames can be committed
-        committable_index, committable_steps = self.time_scheduler.get_committable_count(self.condition_frames)
+        committable_index, committable_steps = self.time_scheduler.get_committable(self.condition_frames)
         while self.current_step < committable_steps:
             time_steps = self.time_scheduler.get_time_steps(
                 device, [self.buf_len], self.current_step)
@@ -823,8 +825,10 @@ class DiffForcingWanModel(nn.Module):
             self.current_step += 1
 
         # 5. Extract newly committed frames
-        output = [self.generated[:, self.current_commit:committable_index, ...]]
-        output = self.postprocess(output)
-        self.current_commit = committable_index 
-
-        return {"generated": output}
+        if self.current_commit < committable_index:
+            output = [self.generated[:, self.current_commit:committable_index, ...]]
+            output = self.postprocess(output)
+            self.current_commit = committable_index
+            return {"generated": output}
+        else:
+            return {"generated": [torch.zeros(0, self.input_dim, device=device)]}
