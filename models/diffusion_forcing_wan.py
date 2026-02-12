@@ -94,9 +94,9 @@ class UniformTimeScheduler:
     def get_committable(self, condition_frames):
         """Given total accumulated conditions, return how many frames can be committed and the corresponding step count."""
         wave_index = condition_frames // self.generate_length
-        committable_index = wave_index * self.generate_length
+        committable_length = wave_index * self.generate_length
         committable_steps = wave_index * self.steps
-        return committable_index, committable_steps
+        return committable_length, committable_steps
 
     def get_step_rollback(self, seq_len):
         """Get the step count to subtract when wrapping the buffer by seq_len."""
@@ -193,9 +193,9 @@ class TriangularTimeScheduler:
     def get_committable(self, total_frames):
         """Given total accumulated conditions, return how many frames can be committed.
         Currently, we suppose steps % chunk_size == 0 for simplicity."""
-        committable_index = max(0, total_frames - self.chunk_size + 1)
+        committable_length = max(0, total_frames - self.chunk_size + 1)
         committable_steps = total_frames * (self.steps // self.chunk_size)
-        return committable_index, committable_steps
+        return committable_length, committable_steps
 
     def get_step_rollback(self, seq_len):
         """Get the step count to subtract when wrapping the buffer by seq_len.
@@ -756,7 +756,7 @@ class DiffForcingWanModel(nn.Module):
             self._rollback()
 
         # 3. Determine how many frames can be committed
-        committable_index, committable_steps = self.time_scheduler.get_committable(self.condition_frames)
+        committable_length, committable_steps = self.time_scheduler.get_committable(self.condition_frames)
         while self.current_step < committable_steps:
             time_steps = self.time_scheduler.get_time_steps(
                 device, [self.buf_len], self.current_step)
@@ -830,11 +830,11 @@ class DiffForcingWanModel(nn.Module):
             self.current_step += 1
 
         # 5. Extract newly committed frames
-        if self.current_commit < committable_index:
-            output = [self.generated[i][:, self.current_commit:committable_index, ...]
+        if self.current_commit < committable_length:
+            output = [self.generated[i][:, self.current_commit:committable_length, ...]
                        for i in range(self.batch_size)]
             output = self.postprocess(output)
-            self.current_commit = committable_index
+            self.current_commit = committable_length
             return {"generated": output}
         else:
             return {"generated": [torch.zeros(0, self.input_dim, device=device)
