@@ -117,8 +117,8 @@ model:
               checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
               tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
         input_dim: 4
-        mean_path: "${dirs.raw_data}/HumanML3D/Mean_TOKEN_20260113_233726_vae_wan_z4_2250000.npy"
-        std_path: "${dirs.raw_data}/HumanML3D/Std_TOKEN_20260113_233726_vae_wan_z4_2250000.npy"
+        mean_path: "${dirs.raw_data}/HumanML3D/Mean_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
+        std_path: "${dirs.raw_data}/HumanML3D/Std_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
         hidden_dim: 256
         ffn_dim: 1024
         freq_dim: 64
@@ -128,7 +128,6 @@ model:
         cfg_scale: 5.0
         prediction_type: "vel"
         causal: False
-        rope_channel_split: [1, 0, 0]
 
 optimizer:
     target: AdamW

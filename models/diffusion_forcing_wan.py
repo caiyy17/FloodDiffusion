@@ -24,7 +24,7 @@ def register_time_scheduler(cls):
 class UniformTimeScheduler:
     def __init__(self, config):
         self.steps = config["steps"]
-        self.generate_length = config["generate_length"]
+        self.chunk_size = config["chunk_size"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
 
@@ -35,15 +35,15 @@ class UniformTimeScheduler:
         time_steps = []
         if current_step is None:
             for i in range(len(valid_len)):
-                time_steps.append(torch.tensor(np.random.uniform(0, 1), device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(np.random.uniform(0, 1), device=device))
         elif isinstance(current_step, int):
             for i in range(len(valid_len)):
                 t = current_step * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         elif isinstance(current_step, list):
             for i in range(len(valid_len)):
                 t = current_step[i] * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         return time_steps
 
     def get_time_schedules(self, device, valid_len, time_steps):
@@ -88,7 +88,7 @@ class UniformTimeScheduler:
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
     
-    def add_noise(self, x, noise_level, training=False):
+    def add_noise(self, x, noise_level, training=False, noise=None):
         """Add noise
         Args:
             x: list of (C, T, H, W)
@@ -97,26 +97,29 @@ class UniformTimeScheduler:
         noisy_x = []
         noise = []
         for i in range(len(x)):
-            noise_i = torch.randn_like(x[i])
+            if noise is not None:
+                noise_i = noise[i]
+            else:
+                noise_i = torch.randn_like(x[i])
             noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
-            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
-            noisy_x.append(noisey_x_i)
+            noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisy_x_i)
             noise.append(noise_i)
         return noisy_x, noise
 
     # --- Streaming support ---
 
-    # We assume seq_len is multiple of generate_length for simplicity
+    # We assume seq_len is multiple of chunk_size for simplicity
     def get_committable(self, condition_frames):
         """Given total accumulated conditions, return how many frames can be committed and the corresponding step count."""
-        wave_index = condition_frames // self.generate_length
-        committable_length = wave_index * self.generate_length
+        wave_index = condition_frames // self.chunk_size
+        committable_length = wave_index * self.chunk_size
         committable_steps = wave_index * self.steps
         return committable_length, committable_steps
 
     def get_step_rollback(self, seq_len):
         """Get the step count to subtract when wrapping the buffer by seq_len."""
-        steps = seq_len // self.generate_length * self.steps
+        steps = seq_len // self.chunk_size * self.steps
         return steps
 
 @register_time_scheduler
@@ -222,8 +225,8 @@ class TriangularTimeScheduler:
         for i in range(len(x)):
             noise_i = torch.randn_like(x[i])
             noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
-            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
-            noisy_x.append(noisey_x_i)
+            noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisy_x_i)
             noise.append(noise_i)
         return noisy_x, noise
 
@@ -587,7 +590,7 @@ class DiffForcingWanModel(nn.Module):
         time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps, training=True)  # (B, T)
         noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
         input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(valid_len, time_steps)
-        noisy_feature, noise = self.time_scheduler.add_noise(feature, noise_level, training=True)  # (B, T, D)
+        noisy_feature, noise = self.time_scheduler.add_noise(feature, noise_level, training=True)
 
         feature_ref = []
         noise_ref = []

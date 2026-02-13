@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from utils.initialize import instantiate, load_config
 
-RAW_DATA_PATH = "raw_data"
+RAW_DATA_PATH = "/mnt/data/cpfs/cyy/raw_data"
 PATH_FILES = [
     [
         f"{RAW_DATA_PATH}/BABEL_streamed/train_processed.txt",
@@ -111,6 +111,26 @@ def tokenize_motion(
                                 )
                         except Exception as e:
                             rank_zero_info(f"Error processing {name}: {e}")
+
+    # Compute and save mean and std across all tokens
+    data_path = os.path.dirname(path_files[0])
+    cur_token_path = os.path.join(data_path, token_path)
+    all_tokens = []
+    for f in tqdm(os.listdir(cur_token_path), desc="Loading tokens for mean/std"):
+        if f.endswith(".npy"):
+            token = np.load(os.path.join(cur_token_path, f))
+            all_tokens.append(token)
+
+    if all_tokens:
+        all_tokens = np.concatenate(all_tokens, axis=0)
+        mean = all_tokens.mean(axis=0)
+        std = all_tokens.std(axis=0)
+        mean_path = os.path.join(data_path, f"Mean_{token_path}.npy")
+        std_path = os.path.join(data_path, f"Std_{token_path}.npy")
+        np.save(mean_path, mean)
+        np.save(std_path, std)
+        rank_zero_info(f"Saved mean to {mean_path}, shape: {mean.shape}")
+        rank_zero_info(f"Saved std to {std_path}, shape: {std.shape}")
 
 
 if __name__ == "__main__":
