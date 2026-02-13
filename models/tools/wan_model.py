@@ -41,11 +41,14 @@ def rope_params(max_seq_len, dim, theta=10000):
 
 
 @torch.amp.autocast("cuda", enabled=False)
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply(x, grid_sizes, freqs, channel_split=None):
     n, c = x.size(2), x.size(3) // 2
-
     # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    if channel_split is not None:
+        part_length = c // (channel_split[0] + channel_split[1] + channel_split[2])
+        freqs = freqs.split([part_length * channel_split[0], part_length * channel_split[1], part_length * channel_split[2]], dim=1)
+    else:
+        freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
     # loop over samples
     output = []
@@ -125,7 +128,7 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, rope_channel_split=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -145,8 +148,8 @@ class WanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
 
         x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+            q=rope_apply(q, grid_sizes, freqs, rope_channel_split),
+            k=rope_apply(k, grid_sizes, freqs, rope_channel_split),
             v=v,
             k_lens=seq_lens,
             window_size=self.window_size,
@@ -221,7 +224,7 @@ class WanAttentionBlock(nn.Module):
             for can in cross_attn_norm
         ])
         self.cross_attn = nn.ModuleList([
-            WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+            WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, causal)
             for _ in range(self.num_cross)
         ])
         self.norm2 = WanLayerNorm(dim, eps)
@@ -241,6 +244,7 @@ class WanAttentionBlock(nn.Module):
         seq_lens,
         grid_sizes,
         freqs,
+        rope_channel_split,
         context,
         context_lens,
     ):
@@ -263,14 +267,16 @@ class WanAttentionBlock(nn.Module):
             seq_lens,
             grid_sizes,
             freqs,
+            rope_channel_split,
         )
         with torch.amp.autocast("cuda", dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
+            x_in = x
             for i in range(self.num_cross):
-                x = x + self.cross_attn[i](self.cross_attn_norms[i](x), context[i], context_lens[i])
+                x = x + self.cross_attn[i](self.cross_attn_norms[i](x_in), context[i], context_lens[i])
             y = self.ffn(
                 self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)
             )
@@ -335,6 +341,7 @@ class WanModel(ModelMixin, ConfigMixin):
         qk_norm=True,
         eps=1e-6,
         causal=False,
+        rope_channel_split=None,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -370,6 +377,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 Epsilon value for normalization layers
             causal (`bool`, *optional*, defaults to False):
                 Enable causal attention for self-attention
+            rope_channel_split (`int`, *optional*, defaults to None):
+                Channel split for rotary positional embeddings
         """
 
         super().__init__()
@@ -390,6 +399,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.qk_norm = qk_norm
         self.eps = eps
         self.causal = causal
+        self.rope_channel_split = rope_channel_split
         
         # embeddings
         self.patch_embedding = nn.Conv3d(
@@ -429,15 +439,27 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
-        d = dim // num_heads
-        self.freqs = torch.cat(
-            [
-                rope_params(1024, d - 4 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-            ],
-            dim=1,
-        )
+        d = dim // num_heads // 2
+        if self.rope_channel_split is not None:
+            assert d % sum(self.rope_channel_split) == 0
+            part_length = d // (self.rope_channel_split[0] + self.rope_channel_split[1] + self.rope_channel_split[2])
+            self.freqs = torch.cat(
+                [
+                    rope_params(1024, 2 * (part_length * self.rope_channel_split[0])),
+                    rope_params(1024, 2 * (part_length * self.rope_channel_split[1])),
+                    rope_params(1024, 2 * (part_length * self.rope_channel_split[2])),
+                ],
+                dim=1,
+            )
+        else:
+            self.freqs = torch.cat(
+                [
+                    rope_params(1024, 2 * (d - 2 * (d // 3))),
+                    rope_params(1024, 2 * (d // 3)),
+                    rope_params(1024, 2 * (d // 3)),
+                ],
+                dim=1,
+            )
 
         # initialize weights
         self.init_weights()
@@ -530,6 +552,7 @@ class WanModel(ModelMixin, ConfigMixin):
             seq_lens=seq_lens,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
+            rope_channel_split=self.rope_channel_split,
             context=all_contexts,
             context_lens=all_context_lens,
         )

@@ -488,7 +488,6 @@ if __name__ == '__main__':
             "noise_type": "linear",
             "chunk_size": 5,
             "steps": 10,
-            "extra_len": 5,
         }
         config_schedule = dict(cfg.model.params.get('schedule_config', {}))
         default_schedule_config.update(config_schedule)

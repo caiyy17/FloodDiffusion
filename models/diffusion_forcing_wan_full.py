@@ -391,6 +391,7 @@ class DiffForcingWanModel(nn.Module):
         causal=False,
         rope_channel_split=None,
         prediction_type="vel",  # "vel", "x0", "noise"
+        concat_dim=0,
         crossmodules=[
             {
                 "name": "T5TextCrossModule",
@@ -421,6 +422,7 @@ class DiffForcingWanModel(nn.Module):
         self.causal = causal
         self.rope_channel_split = rope_channel_split
         self.prediction_type = prediction_type
+        self.concat_dim = concat_dim
         self.cfg_scale = cfg_scale
         self.schedule_config = schedule_config
         self.time_scheduler = TIME_SCHEDULER_REGISTRY[schedule_config["schedule_name"]](schedule_config)
@@ -453,7 +455,7 @@ class DiffForcingWanModel(nn.Module):
             cross_attn_norm=tuple(
                 cm.cross_attn_norm for cm in self.cross_modules
             ),
-            in_dim=self.input_dim,
+            in_dim=self.input_dim + self.concat_dim,
             dim=self.hidden_dim,
             ffn_dim=self.ffn_dim,
             freq_dim=self.freq_dim,
@@ -528,12 +530,12 @@ class DiffForcingWanModel(nn.Module):
         batch_size, seq_len, _ = feature_original.shape
         device = feature_original.device
         feature = []
+        concat_feature = []
         valid_len = []
         for i in range(batch_size):
             length = min(feature_length[i].item(), seq_len)
             valid_len.append(length)
             feature.append(feature_original[i, :length, :])
-
         # get time steps and noise levels
         time_steps = self.time_scheduler.get_time_steps(device, valid_len)  # (B,)
         time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps)  # (B, T)
@@ -553,6 +555,21 @@ class DiffForcingWanModel(nn.Module):
             feature_ref.append(feature[i][:, output_start_index[i]:output_end_index[i], ...])
             noise_ref.append(noise[i][:, output_start_index[i]:output_end_index[i], ...])
             noisy_feature_input.append(noisy_feature[i][:, input_start_index[i]:input_end_index[i], ...])
+
+        # Append concat features if any
+        if self.concat_dim > 0:
+            concat_feature_ = x["concat_feature"]  # (B, T, concat_dim) 
+            for i in range(batch_size):
+                concat_feature.append(concat_feature_[i, :valid_len[i], :])
+            self.preprocess(concat_feature)  # (B, C, T, 1, 1)
+            for i in range(batch_size):
+                noisy_feature_input[i] = torch.cat(
+                    (
+                        noisy_feature_input[i],
+                        concat_feature[i][:, input_start_index[i]:input_end_index[i], ...],
+                    ),
+                    dim=0,
+                )
 
         # Get contexts from cross modules
         all_contexts, _ = self._get_all_contexts(
@@ -697,7 +714,7 @@ class DiffForcingWanModel(nn.Module):
                         - generated[i][:, os:oe, ...]
                     ) / (1 + dt - nl) * nld
                 generated[i][:, os:oe, ...] += predicted_vel * dt
-                
+
         generated = self.postprocess(generated)  # list of (T, C)
         y_hat_out = []
         for i in range(batch_size):
