@@ -87,6 +87,22 @@ class UniformTimeScheduler:
             noise_level.append(nl)
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
+    
+    def add_noise(self, x, noise_level, training=False):
+        """Add noise
+        Args:
+            x: list of (C, T, H, W)
+            noise_level: list of (T,)
+        """
+        noisy_x = []
+        noise = []
+        for i in range(len(x)):
+            noise_i = torch.randn_like(x[i])
+            noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
+            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisey_x_i)
+            noise.append(noise_i)
+        return noisy_x, noise
 
     # --- Streaming support ---
 
@@ -110,6 +126,7 @@ class TriangularTimeScheduler:
         self.chunk_size = config["chunk_size"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
+        self.random_epsilon = config.get("random_epsilon", 0.01) # schedule jittering
 
     def get_total_steps(self, seq_len):
         return int(self.steps * seq_len / self.chunk_size)
@@ -130,7 +147,7 @@ class TriangularTimeScheduler:
                 time_steps.append(torch.tensor(t, device=device))
         return time_steps
 
-    def get_time_schedules(self, device, valid_len, time_steps):
+    def get_time_schedules(self, device, valid_len, time_steps, training=False):
         time_schedules = []
         time_schedules_derivative = []
         for i in range(len(valid_len)):
@@ -146,6 +163,12 @@ class TriangularTimeScheduler:
                 max=1.0,
             )
             current_time_schedules_derivative = torch.clamp((current_time_schedules_next - current_time_schedules), min=0.0, max=1.0)
+            if training:
+                current_time_schedules = torch.clamp(
+                    current_time_schedules + torch.randn_like(current_time_schedules) * self.random_epsilon,
+                    min=0.0,
+                    max=1.0,
+                )
             time_schedules.append(current_time_schedules)
             time_schedules_derivative.append(current_time_schedules_derivative)
         return time_schedules, time_schedules_derivative
@@ -187,6 +210,22 @@ class TriangularTimeScheduler:
             noise_level.append(nl)
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
+    
+    def add_noise(self, x, noise_level, training=False):
+        """Add noise
+        Args:
+            x: list of (C, T, H, W)
+            noise_level: list of (T,)
+        """
+        noisy_x = []
+        noise = []
+        for i in range(len(x)):
+            noise_i = torch.randn_like(x[i])
+            noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
+            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisey_x_i)
+            noise.append(noise_i)
+        return noisy_x, noise
 
     # --- Streaming support ---
 
@@ -389,7 +428,8 @@ class DiffForcingWanModel(nn.Module):
         num_layers=8,
         time_embedding_scale=1.0,
         causal=False,
-        rope_channel_split=None,
+        rope_channel_split=[1, 0, 0],
+        spatial_shape=(1, 1),
         prediction_type="vel",  # "vel", "x0", "noise"
         crossmodules=[
             {
@@ -412,6 +452,7 @@ class DiffForcingWanModel(nn.Module):
         self.mean_path = mean_path
         self.std_path = std_path
         self.input_dim = input_dim
+        self.spatial_shape = tuple(spatial_shape)
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
         self.freq_dim = freq_dim
@@ -469,33 +510,36 @@ class DiffForcingWanModel(nn.Module):
         self.param_dtype = torch.float32
 
     def preprocess(self, x):
-        # (bs, T, C) -> (bs, C, T, 1, 1)
+        """Convert last-channel format to channel-first, padding to 4D (C, T, H, W).
+        (T, C) -> (C, T, 1, 1)
+        (T, H, C) -> (C, T, H, 1)
+        (T, H, W, C) -> (C, T, H, W)
+        """
         for i in range(len(x)):
-            x[i] = x[i].permute(1, 0)[:, :, None, None]
+            ndim = x[i].ndim
+            if ndim == 2:      # (T, C)
+                x[i] = x[i].permute(1, 0)[:, :, None, None]
+            elif ndim == 3:    # (T, H, C)
+                x[i] = x[i].permute(2, 0, 1)[:, :, :, None]
+            elif ndim == 4:    # (T, H, W, C)
+                x[i] = x[i].permute(3, 0, 1, 2)
         return x
 
     def postprocess(self, x):
-        # (bs, C, T, 1, 1) ->  (bs, T, C)
-        for i in range(len(x)):
-            x[i] = x[i].permute(1, 0, 2, 3).contiguous().view(x[i].size(1), -1)
-        return x
-
-    def add_noise(self, x, noise_level):
-        """Add noise
-        Args:
-            x: (B, T, D)
-            noise_level: (B, T)
+        """Reverse of preprocess: channel-first 4D back to last-channel, stripping padding dims.
+        (C, T, 1, 1) -> (T, C)
+        (C, T, H, 1) -> (T, H, C)
+        (C, T, H, W) -> (T, H, W, C)
         """
-        noisy_x = [] # (B, T, D)
-        noise = [] # (B, T, D)
         for i in range(len(x)):
-            noise_i = torch.randn_like(x[i])
-            # noise_level: (B, T) -> (B, T, 1)
-            noise_level_i = noise_level[i].unsqueeze(-1)
-            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
-            noisy_x.append(noisey_x_i)
-            noise.append(noise_i)
-        return noisy_x, noise
+            shape = x[i].shape  # (C, T, H, W)
+            if shape[2] == 1 and shape[3] == 1:      # (C, T, 1, 1) -> (T, C)
+                x[i] = x[i][:, :, 0, 0].permute(1, 0)
+            elif shape[3] == 1:                        # (C, T, H, 1) -> (T, H, C)
+                x[i] = x[i][:, :, :, 0].permute(1, 2, 0)
+            else:                                      # (C, T, H, W) -> (T, H, W, C)
+                x[i] = x[i].permute(1, 2, 3, 0)
+        return x
 
     def _get_all_contexts(self, x, valid_len, seq_len, device, training=False):
         """Get contexts from all cross modules.
@@ -525,26 +569,25 @@ class DiffForcingWanModel(nn.Module):
         feature_original = x["feature"]  # (B, T, C)
         feature_length = x["feature_length"]  # (B,)
         feature_original = (feature_original - self.mean) / self.std
-        batch_size, seq_len, _ = feature_original.shape
+        batch_size = feature_original.shape[0]
+        seq_len = feature_original.shape[1]
         device = feature_original.device
         feature = []
         valid_len = []
         for i in range(batch_size):
             length = min(feature_length[i].item(), seq_len)
             valid_len.append(length)
-            feature.append(feature_original[i, :length, :])
+            feature.append(feature_original[i, :length, ...])
+
+        # Preprocess to (C, T, 1, 1) per sample
+        feature = self.preprocess(feature)
 
         # get time steps and noise levels
         time_steps = self.time_scheduler.get_time_steps(device, valid_len)  # (B,)
-        time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps)  # (B, T)
+        time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps, training=True)  # (B, T)
         noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
         input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(valid_len, time_steps)
-
-        # Add noise to entire sequence
-        noisy_feature, noise = self.add_noise(feature, noise_level)  # (B, T, D)
-        feature = self.preprocess(feature)  # (B, C, T, 1, 1)
-        noisy_feature = self.preprocess(noisy_feature)  # (B, C, T, 1, 1)
-        noise = self.preprocess(noise)  # (B, C, T, 1, 1)
+        noisy_feature, noise = self.time_scheduler.add_noise(feature, noise_level, training=True)  # (B, T, D)
 
         feature_ref = []
         noise_ref = []
@@ -622,10 +665,10 @@ class DiffForcingWanModel(nn.Module):
             valid_len.append(length)
         generated_len = [seq_len for _ in range(batch_size)]
 
-        # Initialize entire sequence as pure noise, generate use seq_len for all samples
-        generated = torch.randn(batch_size, seq_len, self.input_dim, device=device)
+        # Initialize entire sequence as pure noise
+        generated = torch.randn(batch_size, seq_len, *self.spatial_shape, self.input_dim, device=device)
         generated = [generated[i] for i in range(batch_size)]
-        generated = self.preprocess(generated)  # list of (C, total_len, 1, 1)
+        generated = self.preprocess(generated)
 
         # Get contexts from cross modules
         all_contexts, metadata = self._get_all_contexts(
@@ -730,8 +773,8 @@ class DiffForcingWanModel(nn.Module):
         self.condition_frames = 0
 
         device = next(self.parameters()).device
-        # Initialize entire buffer as pure noise — list of B (C, buf_len, 1, 1)
-        generated = torch.randn(batch_size, self.buf_len, self.input_dim, device=device)
+        # Initialize entire buffer as pure noise
+        generated = torch.randn(batch_size, self.buf_len, *self.spatial_shape, self.input_dim, device=device)
         generated = [generated[i] for i in range(batch_size)]
         self.generated = self.preprocess(generated)
 
@@ -746,9 +789,8 @@ class DiffForcingWanModel(nn.Module):
         """Shift buffer by seq_len when conditions overflow the window."""
         for i in range(self.batch_size):
             self.generated[i][:, :self.seq_len, ...] = self.generated[i][:, self.seq_len:, ...].clone()
-            self.generated[i][:, self.seq_len:, ...] = torch.randn(
-                self.input_dim, self.seq_len, 1, 1,
-                device=self.generated[i].device,
+            self.generated[i][:, self.seq_len:, ...] = torch.randn_like(
+                self.generated[i][:, self.seq_len:, ...]
             )
         self.current_step -= self.time_scheduler.get_step_rollback(self.seq_len)
         self.condition_frames -= self.seq_len
@@ -857,5 +899,7 @@ class DiffForcingWanModel(nn.Module):
             self.current_commit = committable_length
             return {"generated": output}
         else:
-            return {"generated": [torch.zeros(0, self.input_dim, device=device)
-                                  for _ in range(self.batch_size)]}
+            empty = [torch.zeros(self.input_dim, 0, *self.spatial_shape, device=device)
+                     for _ in range(self.batch_size)]
+            empty = self.postprocess(empty)
+            return {"generated": empty}
