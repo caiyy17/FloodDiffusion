@@ -22,9 +22,14 @@ class VAEWanModel(nn.Module):
         spatial_downsample=[False, False],
         spatial_dim=0,
         vel_window=[0, 0],
+        input_keys={
+            "feature": "feature",
+            "feature_length": "feature_length",
+        },
         **kwargs,
     ):
         super().__init__()
+        self.input_keys = input_keys
 
         self.mean_path = mean_path
         self.std_path = std_path
@@ -77,19 +82,45 @@ class VAEWanModel(nn.Module):
                 downsample_factor *= 2
         self.downsample_factor = downsample_factor
 
+    def _extract_inputs(self, x):
+        inputs = {}
+        for internal_key, external_key in self.input_keys.items():
+            if external_key in x:
+                inputs[internal_key] = x[external_key]
+        return inputs
+
     def preprocess(self, x):
-        # (bs, T, C) -> (bs, C, T, 1, 1)
-        x = x.permute(0, 2, 1)
-        x = x[:, :, :, None, None]
+        """Convert last-channel batched format to channel-first, padding to 5D (B, C, T, H, W).
+        (B, T, C) -> (B, C, T, 1, 1)
+        (B, T, H, C) -> (B, C, T, H, 1)
+        (B, T, H, W, C) -> (B, C, T, H, W)
+        """
+        ndim = x.ndim
+        if ndim == 3:      # (B, T, C)
+            x = x.permute(0, 2, 1)[:, :, :, None, None]
+        elif ndim == 4:    # (B, T, H, C)
+            x = x.permute(0, 3, 1, 2)[:, :, :, :, None]
+        elif ndim == 5:    # (B, T, H, W, C)
+            x = x.permute(0, 4, 1, 2, 3)
         return x
 
     def postprocess(self, x):
-        # (bs, C, T, 1, 1) ->  (bs, T, C)
-        x = x.squeeze(-1).squeeze(-1)
-        x = x.permute(0, 2, 1)
+        """Reverse of preprocess: channel-first 5D back to last-channel, stripping padding dims.
+        (B, C, T, 1, 1) -> (B, T, C)
+        (B, C, T, H, 1) -> (B, T, H, C)
+        (B, C, T, H, W) -> (B, T, H, W, C)
+        """
+        shape = x.shape  # (B, C, T, H, W)
+        if shape[3] == 1 and shape[4] == 1:      # (B, C, T, 1, 1) -> (B, T, C)
+            x = x[:, :, :, 0, 0].permute(0, 2, 1)
+        elif shape[4] == 1:                        # (B, C, T, H, 1) -> (B, T, H, C)
+            x = x[:, :, :, :, 0].permute(0, 2, 3, 1)
+        else:                                      # (B, C, T, H, W) -> (B, T, H, W, C)
+            x = x.permute(0, 2, 3, 4, 1)
         return x
 
     def forward(self, x):
+        x = self._extract_inputs(x)
         features = x["feature"]
         feature_length = x["feature_length"]
         features = (features - self.mean) / self.std
@@ -111,11 +142,13 @@ class VAEWanModel(nn.Module):
 
         if x_out.size(1) != features.size(1):
             min_len = min(x_out.size(1), features.size(1))
-            x_out = x_out[:, :min_len, :]
-            features = features[:, :min_len, :]
+            x_out = x_out[:, :min_len]
+            features = features[:, :min_len]
             mask = mask[:, :min_len]
 
-        mask_expanded = mask.unsqueeze(-1)
+        mask_expanded = mask
+        for _ in range(features.ndim - 2):
+            mask_expanded = mask_expanded.unsqueeze(-1)
         x_out_masked = x_out * mask_expanded
         features_masked = features * mask_expanded
         loss_recons = self.RECONS_LOSS(x_out_masked, features_masked)
@@ -149,9 +182,10 @@ class VAEWanModel(nn.Module):
         # Apply mask: only compute KL loss for valid timesteps
         kl_masked = kl_per_element * mask_latent
         # Sum over all dimensions and normalize by the number of valid elements
+        num_latent_elements = mu.size(1) * mu.size(3) * mu.size(4)  # C * H * W
         kl_loss = torch.sum(kl_masked) / (
-            torch.sum(mask_downsampled) * mu.size(1)
-        )  # normalize by valid timesteps * latent_dim
+            torch.sum(mask_downsampled) * num_latent_elements
+        )  # normalize by valid timesteps * (C * H * W)
 
         # Total loss
         total_loss = (
@@ -204,6 +238,7 @@ class VAEWanModel(nn.Module):
         self.model.clear_cache()
 
     def generate(self, x):
+        x = self._extract_inputs(x)
         features = x["feature"]
         feature_length = x["feature_length"]
         y_hat = self.decode(self.encode(features))
@@ -216,7 +251,7 @@ class VAEWanModel(nn.Module):
                 feature_length[i] - 1
             ) // self.downsample_factor * self.downsample_factor + 1
             # Make sure both have the same length (take minimum)
-            y_hat_out.append(y_hat[i, :valid_len, :])
+            y_hat_out.append(y_hat[i, :valid_len])
 
         out = {}
         out["generated"] = y_hat_out

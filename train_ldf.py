@@ -77,6 +77,7 @@ class CustomLightningModule(BasicLightningModule):
         gt_token_length = batch["token_length"]
         ground_truth_feature = batch["feature"]
         gt_feature_length = batch["feature_length"]
+        text_tokens = batch["text_tokens"]
 
         for i in range(len(generated)):
             # Decode motion
@@ -95,7 +96,7 @@ class CustomLightningModule(BasicLightningModule):
             single_gt_o = ground_truth_feature[i]
             decoded_single_gt_o = single_gt_o[: gt_feature_length[i], :].to(self.device)
             decoded_single_gt_o = decoded_single_gt_o.float().to(self.device)
-            text_tokens_single = batch["text_tokens"][i]
+            text_tokens_single = text_tokens[i]
             if self.cfg.metrics.t2m.fid_target == "vae":
                 self.t2m_metrics.update(
                     feats_rst=decoded_single_generated[None, ...],
@@ -127,6 +128,7 @@ class CustomLightningModule(BasicLightningModule):
         # Save motion
         generated_id = batch["name"]  # [batch_size]
         dataset_id = batch["dataset"]  # [batch_size]
+        feature_text_end = batch.get("feature_text_end", None)  # [batch_size, feature_length] or None
 
         # Decode motion to latent space
         # NOTE: inside the to() function, if will check current_tensor.device == target_device, then run this in each loop is fine.
@@ -135,8 +137,8 @@ class CustomLightningModule(BasicLightningModule):
             single_generated_id = generated_id[i]
             single_dataset_id = dataset_id[i]
             single_text = text[i]
-            if "feature_text_end" in batch:
-                single_feature_text_end = batch["feature_text_end"][i]
+            if feature_text_end is not None:
+                single_feature_text_end = feature_text_end[i]
                 frames = np.array(single_feature_text_end)
             else:
                 frames = None
