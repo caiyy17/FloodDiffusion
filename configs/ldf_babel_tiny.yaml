@@ -5,7 +5,7 @@ train: true
 
 save_dir: ./outputs
 resume_ckpt: null
-test_ckpt: "${dirs.outputs}/20260212_211535_test_5090_ldf_new/step_step=10000.ckpt"
+test_ckpt: "${dirs.outputs}/20260213_235423_ldf_tiny_base/step_step=20000.ckpt"
 test_vae_ckpt: "${dirs.outputs}/20260113_233726_vae_wan_z4/step_step=2250000.ckpt"
 test_vae:
     target: models.vae_wan.VAEWanModel
@@ -124,16 +124,15 @@ data:
           stream_mode: true
 
 model:
-    target: models.diffusion_forcing_wan.DiffForcingWanModel
+    target: models.diffusion_forcing.DiffForcingWanModel
     ema_decay: 0.99
     params:
-        crossmodules:
-            - name: T5TextCrossModule
-              len: 256
-              dim: 768
-              t5_size: "base"
-              checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
-              tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
+        text_config:
+            len: 256
+            dim: 768
+            t5_size: "base"
+            checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
+            tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
         input_dim: 4
         mean_path: "${dirs.raw_data}/HumanML3D/Mean_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
         std_path: "${dirs.raw_data}/HumanML3D/Std_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
@@ -143,11 +142,14 @@ model:
         num_heads: 8
         num_layers: 8
         time_embedding_scale: 1.0
+        input_keys:
+            feature: "token"
+            feature_length: "token_length"
+            text: "text"
+            text_end: "token_text_end"
         cfg_config:
-            - scale: 5.0
-              crossmodule: [true]
-            - scale: -4.0
-              crossmodule: [false]
+            text_scale: 5.0
+            null_scale: -4.0
         prediction_type: "vel"
         causal: False
 
